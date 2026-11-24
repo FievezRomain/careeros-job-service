@@ -120,10 +120,12 @@ def test_logs_exclude_request_payload_and_reject_unsafe_correlation_id(
 
 def test_http_startup_fails_closed_when_migrations_are_incomplete() -> None:
     service = StartService(FakeMigrationRunner(MigrationState(expected=("0001",), applied=())))
-    app = create_http_app(service)
+    shutdown_calls: list[bool] = []
+    app = create_http_app(service, shutdown=lambda: shutdown_calls.append(True))
 
     with pytest.raises(MigrationHeadsIncomplete), TestClient(app):
         pass
+    assert shutdown_calls == [True]
 
 
 @pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="isolated PostgreSQL unavailable")
