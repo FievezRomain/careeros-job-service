@@ -1,3 +1,5 @@
+import hashlib
+import json
 import os
 from datetime import UTC, datetime, timedelta
 from typing import cast
@@ -19,6 +21,7 @@ from careeros_job.application.manual_capture import (
     AccountContext,
     CaptureManualOpportunity,
     CaptureResult,
+    QueryOpportunityCatalog,
     TokenValidationError,
 )
 from careeros_job.application.startup import MigrationState, StartService
@@ -36,7 +39,7 @@ NOW = datetime(2026, 11, 24, 8, tzinfo=UTC)
 
 
 class CompleteMigrations:
-    state = MigrationState(expected=("0001", "0002"), applied=("0001", "0002"))
+    state = MigrationState(expected=("0001", "0002", "0003"), applied=("0001", "0002", "0003"))
 
     def apply_pending(self) -> MigrationState:
         return self.state
@@ -55,9 +58,19 @@ class FixedIds:
         return OPPORTUNITY_ID
 
 
+class SequenceIds:
+    def __init__(self) -> None:
+        self._value = 0
+
+    def new(self) -> UUID:
+        self._value += 1
+        return UUID(f"40000000-0000-4000-8000-{self._value:012d}")
+
+
 class MemoryRepository:
     def __init__(self) -> None:
-        self.records: dict[tuple[UUID, UUID, str], tuple[str, Opportunity]] = {}
+        self.commands: dict[tuple[UUID, UUID, str], tuple[str, UUID]] = {}
+        self.records: list[tuple[OpportunityOwner, str, str, Opportunity]] = []
         self.last_owner: OpportunityOwner | None = None
 
     def capture(
@@ -66,20 +79,44 @@ class MemoryRepository:
         draft: ManualOpportunityDraft,
         *,
         opportunity_id: UUID,
+        group_id: UUID,
         captured_at: datetime,
         idempotency_key: str,
         request_fingerprint: str,
+        grouping_key: str,
+        content_fingerprint: str,
     ) -> CaptureResult:
         self.last_owner = owner
         key = (owner.tenant_id, owner.account_id, idempotency_key)
-        existing = self.records.get(key)
-        if existing:
-            fingerprint, opportunity = existing
+        existing = self.commands.get(key)
+        if existing is not None:
+            fingerprint, existing_id = existing
             if fingerprint != request_fingerprint:
                 return CaptureResult(outcome="conflict")
+            opportunity = self.get(owner, existing_id)
             return CaptureResult(outcome="replayed", opportunity=opportunity)
+        group_records = [
+            record
+            for record_owner, record_grouping, _, record in self.records
+            if record_owner == owner and record_grouping == grouping_key
+        ]
+        duplicate = next(
+            (
+                record
+                for record_owner, record_grouping, record_content, record in self.records
+                if record_owner == owner
+                and record_grouping == grouping_key
+                and record_content == content_fingerprint
+            ),
+            None,
+        )
+        if duplicate is not None:
+            self.commands[key] = (request_fingerprint, duplicate.opportunity_id)
+            return CaptureResult(outcome="deduplicated", opportunity=duplicate)
         opportunity = Opportunity(
             opportunity_id=opportunity_id,
+            group_id=group_id,
+            version=len(group_records) + 1,
             title=draft.title,
             employer=draft.employer,
             description=draft.description,
@@ -90,18 +127,48 @@ class MemoryRepository:
             ),
             created_at=captured_at,
         )
-        self.records[key] = (request_fingerprint, opportunity)
+        self.records.append((owner, grouping_key, content_fingerprint, opportunity))
+        self.commands[key] = (request_fingerprint, opportunity_id)
         return CaptureResult(outcome="created", opportunity=opportunity)
+
+    def get(self, owner: OpportunityOwner, opportunity_id: UUID) -> Opportunity | None:
+        return next(
+            (
+                record
+                for record_owner, _, _, record in self.records
+                if record_owner == owner and record.opportunity_id == opportunity_id
+            ),
+            None,
+        )
+
+    def list_current(
+        self, owner: OpportunityOwner, *, offset: int, limit: int
+    ) -> tuple[tuple[Opportunity, ...], int]:
+        latest: dict[UUID, Opportunity] = {}
+        for record_owner, _, _, record in self.records:
+            if record_owner != owner:
+                continue
+            current = latest.get(record.group_id)
+            if current is None or current.version < record.version:
+                latest[record.group_id] = record
+        ordered = sorted(latest.values(), key=lambda item: (item.created_at, item.opportunity_id))
+        ordered.reverse()
+        return tuple(ordered[offset : offset + limit]), len(ordered)
 
 
 class StaticVerifier:
-    def __init__(self, scopes: tuple[str, ...] = ("jobs:write",)) -> None:
+    def __init__(
+        self,
+        scopes: tuple[str, ...] = ("jobs:read", "jobs:write"),
+        account_id: UUID = ACCOUNT_ID,
+    ) -> None:
         self._scopes = scopes
+        self._account_id = account_id
 
     def verify(self, token: str) -> AccountContext:
         if token != "valid-token":
             raise TokenValidationError
-        return AccountContext(account_id=ACCOUNT_ID, tenant_id=TENANT_ID, scopes=self._scopes)
+        return AccountContext(account_id=self._account_id, tenant_id=TENANT_ID, scopes=self._scopes)
 
 
 def draft() -> dict[str, str]:
@@ -117,12 +184,14 @@ def draft() -> dict[str, str]:
 def application(
     repository: MemoryRepository | None = None,
     verifier: StaticVerifier | None = None,
+    identifiers: FixedIds | SequenceIds | None = None,
 ) -> tuple[TestClient, MemoryRepository]:
     storage = repository or MemoryRepository()
-    use_case = CaptureManualOpportunity(storage, FixedClock(), FixedIds())
+    use_case = CaptureManualOpportunity(storage, FixedClock(), identifiers or FixedIds())
     app = create_http_app(
         StartService(CompleteMigrations()),
         capture_manual=use_case,
+        query_catalog=QueryOpportunityCatalog(storage),
         token_verifier=verifier or StaticVerifier(),
     )
     return TestClient(app), storage
@@ -148,6 +217,10 @@ def test_manual_capture_preserves_provenance_and_owner_with_idempotent_replay() 
         "capturedAt": "2026-11-24T08:00:00Z",
     }
     assert repository.last_owner == OpportunityOwner(account_id=ACCOUNT_ID, tenant_id=TENANT_ID)
+    legacy_payload = json.dumps(draft(), sort_keys=True, separators=(",", ":"))
+    assert repository.commands[(TENANT_ID, ACCOUNT_ID, "manual-capture-0001")][0] == (
+        hashlib.sha256(legacy_payload.encode()).hexdigest()
+    )
 
 
 def test_validation_authentication_scope_and_idempotency_fail_closed() -> None:
@@ -206,6 +279,8 @@ def test_manual_capture_contract_is_versioned_and_rejects_blank_raw_source() -> 
             headers=headers("blank-source-0001"),
         )
     assert "/v1/jobs/manual" in contract["paths"]
+    assert "/v1/jobs" in contract["paths"]
+    assert "/v1/jobs/{opportunity_id}" in contract["paths"]
     assert set(contract["paths"]["/v1/jobs/manual"]["post"]["responses"]) >= {
         "200",
         "201",
@@ -216,8 +291,108 @@ def test_manual_capture_contract_is_versioned_and_rejects_blank_raw_source() -> 
         "422",
     }
     assert invalid.status_code == 422
+    assert set(contract["paths"]["/v1/jobs"]["get"]["responses"]) >= {
+        "200",
+        "401",
+        "403",
+        "422",
+    }
+    assert set(contract["paths"]["/v1/jobs/{opportunity_id}"]["get"]["responses"]) >= {
+        "200",
+        "401",
+        "403",
+        "404",
+        "422",
+    }
     with pytest.raises(ValidationError):
         ManualOpportunityDraft.model_validate({**draft(), "rawSource": "\n"})
+
+
+def test_normalization_deduplication_versioning_and_current_catalog_query() -> None:
+    client, _ = application(identifiers=SequenceIds())
+    with client:
+        first = client.post(
+            "/v1/jobs/manual",
+            json={**draft(), "title": "  Platform\u00a0Engineer  ", "employer": "Example   Labs"},
+            headers=headers("normalized-first-001"),
+        )
+        duplicate = client.post(
+            "/v1/jobs/manual",
+            json={**draft(), "title": "platform engineer", "employer": "example labs"},
+            headers=headers("normalized-second-01"),
+        )
+        deduplicated_key_conflict = client.post(
+            "/v1/jobs/manual",
+            json={**draft(), "description": "A different request."},
+            headers=headers("normalized-second-01"),
+        )
+        changed = client.post(
+            "/v1/jobs/manual",
+            json={
+                **draft(),
+                "description": "Build a synthetic platform and own reliability.",
+                "rawSource": f"{draft()['rawSource']}\nOwn reliability.",
+            },
+            headers=headers("material-change-0001"),
+        )
+        separated = client.post(
+            "/v1/jobs/manual",
+            json={**draft(), "forceSeparate": True},
+            headers=headers("forced-separate-001"),
+        )
+        catalog = client.get("/v1/jobs?page=1&pageSize=20", headers=headers())
+        previous = client.get(f"/v1/jobs/{first.json()['opportunityId']}", headers=headers())
+
+    assert first.status_code == 201
+    assert first.json()["title"] == "Platform Engineer"
+    assert first.json()["employer"] == "Example Labs"
+    assert duplicate.status_code == 200
+    assert duplicate.json()["opportunityId"] == first.json()["opportunityId"]
+    assert deduplicated_key_conflict.status_code == 409
+    assert changed.status_code == 201
+    assert changed.json()["groupId"] == first.json()["groupId"]
+    assert changed.json()["version"] == 2
+    assert previous.status_code == 200
+    assert previous.json()["version"] == 1
+    assert separated.status_code == 201
+    assert separated.json()["groupId"] != first.json()["groupId"]
+    assert catalog.status_code == 200
+    assert catalog.json()["total"] == 2
+    assert catalog.json()["items"][0]["evidence"] == {
+        "statedFields": ["title", "employer", "description"],
+        "inferredFields": [],
+        "unknownFields": ["location", "contractType", "workMode"],
+    }
+
+
+def test_catalog_query_requires_read_scope_and_hides_cross_owner_records() -> None:
+    repository = MemoryRepository()
+    identifiers = SequenceIds()
+    owner_client, _ = application(repository=repository, identifiers=identifiers)
+    other_id = UUID("30000000-0000-0000-0000-000000000002")
+    other_client, _ = application(
+        repository=repository,
+        verifier=StaticVerifier(account_id=other_id),
+        identifiers=identifiers,
+    )
+    denied_client, _ = application(
+        repository=repository,
+        verifier=StaticVerifier(scopes=("jobs:write",)),
+        identifiers=identifiers,
+    )
+    with owner_client, other_client, denied_client:
+        created = owner_client.post(
+            "/v1/jobs/manual", json=draft(), headers=headers("owned-query-00001")
+        )
+        opportunity_id = created.json()["opportunityId"]
+        hidden = other_client.get(f"/v1/jobs/{opportunity_id}", headers=headers())
+        denied = denied_client.get("/v1/jobs?page=1&pageSize=20", headers=headers())
+        unauthenticated = owner_client.get("/v1/jobs?page=1&pageSize=20")
+
+    assert hidden.status_code == 404
+    assert hidden.json()["code"] == "OPPORTUNITY_NOT_FOUND"
+    assert denied.status_code == 403
+    assert unauthenticated.status_code == 401
 
 
 @pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="isolated PostgreSQL unavailable")
@@ -231,22 +406,45 @@ def test_postgresql_repository_persists_and_replays_owned_manual_capture() -> No
         use_case = CaptureManualOpportunity(
             SqlAlchemyOpportunityRepository(engine),
             FixedClock(),
-            FixedIds(),
+            SequenceIds(),
         )
+        query = QueryOpportunityCatalog(SqlAlchemyOpportunityRepository(engine))
         account = AccountContext(
             account_id=ACCOUNT_ID,
             tenant_id=TENANT_ID,
-            scopes=("jobs:write",),
+            scopes=("jobs:read", "jobs:write"),
         )
         manual_draft = ManualOpportunityDraft.model_validate(draft())
 
         created = use_case.execute(account, manual_draft, "postgres-capture-0001")
         replayed = use_case.execute(account, manual_draft, "postgres-capture-0001")
+        deduplicated = use_case.execute(
+            account,
+            manual_draft.model_copy(update={"title": "platform engineer"}),
+            "postgres-capture-0002",
+        )
+        changed = use_case.execute(
+            account,
+            manual_draft.model_copy(
+                update={
+                    "description": "Build a synthetic platform and own reliability.",
+                    "raw_source": f"{draft()['rawSource']}\nOwn reliability.",
+                }
+            ),
+            "postgres-capture-0003",
+        )
+        catalog = query.list(account, page=1, page_size=20)
 
         assert created.created
         assert not replayed.created
+        assert not deduplicated.created
         assert replayed.opportunity == created.opportunity
         assert replayed.opportunity.source.raw_text == draft()["rawSource"]
+        assert changed.opportunity.group_id == created.opportunity.group_id
+        assert changed.opportunity.version == 2
+        assert catalog.total == 1
+        assert catalog.items == (changed.opportunity,)
+        assert query.get(account, created.opportunity.opportunity_id).version == 1
     finally:
         migrations.rollback_all()
         migrations.dispose()
