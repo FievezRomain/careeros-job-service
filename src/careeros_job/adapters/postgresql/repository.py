@@ -250,6 +250,7 @@ class SqlAlchemyOpportunityRepository:
                 updated_at=captured_at,
             )
             session.add(row)
+            session.flush()
             session.add(
                 JobCaptureCommandRow(
                     tenant_id=str(owner.tenant_id),
