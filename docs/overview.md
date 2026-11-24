@@ -13,6 +13,7 @@ Normalized job records, source provenance and freshness metadata.
 - Inputs: Authorized feeds, user imports and source adapters.
 - Outputs: Job lifecycle events and query APIs.
 - Dependencies: automation for scheduled collection; identity for scoped user data.
+- `POST /v1/jobs/manual` records one owned opportunity from explicit user input. It requires a valid bearer token, the `jobs:write` scope and an `Idempotency-Key`.
 
 ## Contract rules
 
@@ -29,6 +30,7 @@ Normalized job records, source provenance and freshness metadata.
 - PostgreSQL 16 is isolated to this service. Migration scripts and their runner live under `adapters/postgresql/migrations`.
 - Startup applies pending migrations, verifies all expected heads and fails before serving traffic when verification is incomplete.
 - `/health/live` and `/health/ready` are operational endpoints only; no job business endpoint is introduced by the scaffold.
+- Manual capture is orchestrated by an application use case through injected identity, clock, identifier and repository ports. JWT and SQLAlchemy types remain in adapters.
 
 ## Non-goals
 
@@ -38,4 +40,4 @@ This service does not absorb responsibilities owned by another CareerOS service.
 
 Persist the minimum data required, record provenance, define retention, redact logs and use synthetic examples in this public repository.
 
-The initial schema stores only an opaque record identifier, owner identifier and timestamps. Raw job source content and provenance are deliberately deferred to V1-018. Database credentials are supplied through environment-specific secret storage and are never logged.
+Manual capture stores the title, employer, description, source reference, exact raw source wording and server-recorded capture time for the authenticated owner and tenant. Raw source text is retained with the opportunity until future deletion/retention behavior is delivered; it is never written to logs. Database and OIDC credentials are supplied through environment-specific secret storage and are never logged.
