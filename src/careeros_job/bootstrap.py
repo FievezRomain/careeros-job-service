@@ -12,7 +12,10 @@ from careeros_job.adapters.postgresql.migrations.runner import (
     PostgresMigrationRunner,
 )
 from careeros_job.adapters.postgresql.repository import SqlAlchemyOpportunityRepository
-from careeros_job.application.manual_capture import CaptureManualOpportunity
+from careeros_job.application.manual_capture import (
+    CaptureManualOpportunity,
+    QueryOpportunityCatalog,
+)
 from careeros_job.application.startup import StartService
 
 
@@ -39,8 +42,9 @@ def create_application() -> FastAPI:
     database_url = settings.database_url.get_secret_value()
     engine = create_engine(database_url, pool_pre_ping=True)
     migrations = PostgresMigrationRunner(engine)
+    opportunities = SqlAlchemyOpportunityRepository(engine)
     capture_manual = CaptureManualOpportunity(
-        SqlAlchemyOpportunityRepository(engine),
+        opportunities,
         SystemClock(),
         Uuid4Factory(),
     )
@@ -52,6 +56,7 @@ def create_application() -> FastAPI:
     return create_http_app(
         StartService(migrations),
         capture_manual=capture_manual,
+        query_catalog=QueryOpportunityCatalog(opportunities),
         token_verifier=token_verifier,
         shutdown=engine.dispose,
     )

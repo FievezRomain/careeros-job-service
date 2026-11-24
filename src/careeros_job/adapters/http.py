@@ -4,10 +4,20 @@ import re
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import Annotated, Protocol, cast
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import jwt
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, Security, status
+from fastapi import (
+    Depends,
+    FastAPI,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    Security,
+    status,
+)
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -18,7 +28,10 @@ from careeros_job.application.manual_capture import (
     AccountContext,
     CaptureManualOpportunity,
     IdempotencyKeyConflict,
+    OpportunityNotFound,
+    OpportunityPage,
     PermissionDenied,
+    QueryOpportunityCatalog,
     TokenValidationError,
     TokenVerifier,
 )
@@ -117,6 +130,7 @@ def create_http_app(
     logger: logging.Logger | None = None,
     *,
     capture_manual: CaptureManualOpportunity | None = None,
+    query_catalog: QueryOpportunityCatalog | None = None,
     token_verifier: TokenVerifier | None = None,
     shutdown: Callable[[], None] | None = None,
 ) -> FastAPI:
@@ -217,7 +231,7 @@ def create_http_app(
                 detail=(
                     "Idempotency-Key must contain 16 to 128 allowed characters."
                     if header_error
-                    else "The request does not satisfy the manual opportunity contract."
+                    else "The request does not satisfy the job-service contract."
                 ),
                 code="IDEMPOTENCY_KEY_INVALID" if header_error else "VALIDATION_FAILED",
                 correlation_id=request.state.correlation_id,
@@ -275,5 +289,57 @@ def create_http_app(
             response.status_code = 201 if result.created else 200
             response.headers["Location"] = f"/v1/jobs/{result.opportunity.opportunity_id}"
             return result.opportunity
+
+        if query_catalog is not None:
+
+            @app.get(
+                "/v1/jobs",
+                response_model=OpportunityPage,
+                response_model_by_alias=True,
+                responses={
+                    401: {"model": Problem, "description": "Unauthenticated"},
+                    403: {"model": Problem, "description": "Missing jobs:read scope"},
+                    422: {"model": Problem, "description": "Invalid pagination"},
+                },
+                tags=["Jobs"],
+            )
+            def list_jobs(
+                account: Account,
+                page: Annotated[int, Query(ge=1)] = 1,
+                page_size: Annotated[int, Query(alias="pageSize", ge=1, le=100)] = 20,
+            ) -> OpportunityPage:
+                try:
+                    return query_catalog.list(account, page=page, page_size=page_size)
+                except PermissionDenied:
+                    raise _http_error(
+                        403, "FORBIDDEN", "Forbidden", "The jobs:read scope is required."
+                    ) from None
+
+            @app.get(
+                "/v1/jobs/{opportunity_id}",
+                response_model=Opportunity,
+                response_model_by_alias=True,
+                responses={
+                    401: {"model": Problem, "description": "Unauthenticated"},
+                    403: {"model": Problem, "description": "Missing jobs:read scope"},
+                    404: {"model": Problem, "description": "Opportunity not found"},
+                    422: {"model": Problem, "description": "Invalid opportunity identifier"},
+                },
+                tags=["Jobs"],
+            )
+            def get_job(opportunity_id: UUID, account: Account) -> Opportunity:
+                try:
+                    return query_catalog.get(account, opportunity_id)
+                except PermissionDenied:
+                    raise _http_error(
+                        403, "FORBIDDEN", "Forbidden", "The jobs:read scope is required."
+                    ) from None
+                except OpportunityNotFound:
+                    raise _http_error(
+                        404,
+                        "OPPORTUNITY_NOT_FOUND",
+                        "Opportunity not found",
+                        "The opportunity does not exist or is not owned by this account.",
+                    ) from None
 
     return app
