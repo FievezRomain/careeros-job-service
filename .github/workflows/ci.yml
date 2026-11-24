@@ -1,0 +1,52 @@
+name: Job service CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: careeros_job_test
+          POSTGRES_USER: careeros_job
+          POSTGRES_PASSWORD: test-only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U careeros_job -d careeros_job_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql+psycopg://careeros_job:test-only@localhost:5432/careeros_job_test
+      TEST_DATABASE_URL: postgresql+psycopg://careeros_job:test-only@localhost:5432/careeros_job_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - run: python -m pip install uv==0.13.9
+      - run: uv sync --locked --all-groups
+      - run: uv run ruff format --check .
+      - run: uv run ruff check .
+      - run: uv run mypy src tests
+      - run: uv run pytest
+      - run: uv run pip-audit
+      - run: uv run bandit -q -r src
+      - run: uv run python -m careeros_job.adapters.postgresql.migrations.runner upgrade
+      - run: uv run python -m careeros_job.adapters.postgresql.migrations.runner downgrade
+      - uses: actions/checkout@v4
+        with:
+          repository: FievezRomain/careeros-workspace
+          ref: a26863f33772b2ea7d3f25aefbdb148ad8728f36
+          path: .careeros-workspace
+      - run: uv run python .careeros-workspace/scripts/check_service_quality.py .
