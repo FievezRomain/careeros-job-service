@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import DateTime, Engine, String, Text, UniqueConstraint, select
+from sqlalchemy import DateTime, Engine, String, Text, UniqueConstraint, Uuid, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
@@ -26,7 +26,7 @@ class JobRecordRow(Base):
         ),
     )
 
-    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
     owner_id: Mapped[str] = mapped_column(String(36), nullable=False)
     tenant_id: Mapped[str] = mapped_column(String(36), nullable=False)
     title: Mapped[str] = mapped_column(String(200), nullable=False)
@@ -124,7 +124,7 @@ class SqlAlchemyOpportunityRepository:
             if existing is not None:
                 return _existing_result(existing, request_fingerprint)
             row = JobRecordRow(
-                id=str(opportunity_id),
+                id=opportunity_id,
                 owner_id=str(owner.account_id),
                 tenant_id=str(owner.tenant_id),
                 title=draft.title,
