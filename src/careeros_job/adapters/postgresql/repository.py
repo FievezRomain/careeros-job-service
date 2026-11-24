@@ -19,8 +19,10 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sess
 
 from careeros_job.application.manual_capture import CaptureResult
 from careeros_job.domain.opportunity import (
+    DiscoveredSourceProvenance,
     ManualOpportunityDraft,
     Opportunity,
+    OpportunityEvidence,
     OpportunityOwner,
     SourceProvenance,
 )
@@ -66,6 +68,11 @@ class JobRecordRow(Base):
     request_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    source_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    source_external_id: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    source_location: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
 
 
 class JobCaptureCommandRow(Base):
@@ -85,6 +92,23 @@ def _aware(value: datetime) -> datetime:
 
 
 def _opportunity(row: JobRecordRow) -> Opportunity:
+    source = (
+        SourceProvenance(
+            reference=row.source_reference,
+            raw_text=row.raw_source,
+            captured_at=_aware(row.captured_at),
+        )
+        if row.source_kind == "manual"
+        else DiscoveredSourceProvenance(
+            kind="greenhouse",
+            source_id=row.source_id or row.source_kind,
+            external_identifier=row.source_external_id or str(row.id),
+            reference=row.source_reference,
+            raw_text=row.raw_source,
+            observed_at=_aware(row.captured_at),
+            last_seen_at=_aware(row.last_seen_at or row.captured_at),
+        )
+    )
     return Opportunity(
         opportunity_id=row.id,
         group_id=row.group_id,
@@ -92,10 +116,16 @@ def _opportunity(row: JobRecordRow) -> Opportunity:
         title=row.title,
         employer=row.employer,
         description=row.description,
-        source=SourceProvenance(
-            reference=row.source_reference,
-            raw_text=row.raw_source,
-            captured_at=_aware(row.captured_at),
+        location=row.source_location,
+        source=source,
+        status=row.status,
+        evidence=(
+            OpportunityEvidence()
+            if row.source_kind == "manual"
+            else OpportunityEvidence(
+                stated_fields=("title", "employer", "description", "location"),
+                unknown_fields=("contractType", "workMode"),
+            )
         ),
         created_at=_aware(row.created_at),
     )
