@@ -68,6 +68,18 @@ class SourceProvenance(BaseModel):
     captured_at: datetime = Field(alias="capturedAt")
 
 
+class DiscoveredSourceProvenance(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, populate_by_name=True)
+
+    kind: Literal["greenhouse"]
+    source_id: str = Field(alias="sourceId", min_length=1, max_length=200)
+    external_identifier: str = Field(alias="externalIdentifier", min_length=1, max_length=500)
+    reference: SourceReference
+    raw_text: str = Field(alias="rawText", min_length=1, max_length=100_000)
+    observed_at: datetime = Field(alias="observedAt")
+    last_seen_at: datetime = Field(alias="lastSeenAt")
+
+
 class OpportunityEvidence(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, populate_by_name=True)
 
@@ -89,6 +101,8 @@ class Opportunity(BaseModel):
     title: Title
     employer: Employer
     description: Description
-    source: SourceProvenance
+    location: str | None = Field(default=None, max_length=500)
+    source: Annotated[SourceProvenance | DiscoveredSourceProvenance, Field(discriminator="kind")]
+    status: Literal["active", "saved", "ignored", "expired", "applied"] = "active"
     evidence: OpportunityEvidence = Field(default_factory=OpportunityEvidence)
     created_at: datetime = Field(alias="createdAt")

@@ -24,6 +24,14 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jwt import PyJWK, PyJWKClient, PyJWTError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from careeros_job.application.discovery import (
+    DiscoveryIdempotencyConflict,
+    DiscoveryRunCommand,
+    DiscoveryRunResult,
+    RunDailyDiscovery,
+    SearchSnapshotEvent,
+    SynchronizeSearchSnapshot,
+)
 from careeros_job.application.manual_capture import (
     AccountContext,
     CaptureManualOpportunity,
@@ -49,6 +57,12 @@ class HealthResponse(BaseModel):
 
     service: str = "careeros-job-service"
     state: ServiceState
+
+
+class SearchSyncResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    applied: bool
 
 
 class JsonFormatter(logging.Formatter):
@@ -131,6 +145,8 @@ def create_http_app(
     *,
     capture_manual: CaptureManualOpportunity | None = None,
     query_catalog: QueryOpportunityCatalog | None = None,
+    synchronize_search: SynchronizeSearchSnapshot | None = None,
+    run_discovery: RunDailyDiscovery | None = None,
     token_verifier: TokenVerifier | None = None,
     shutdown: Callable[[], None] | None = None,
 ) -> FastAPI:
@@ -340,6 +356,83 @@ def create_http_app(
                         "OPPORTUNITY_NOT_FOUND",
                         "Opportunity not found",
                         "The opportunity does not exist or is not owned by this account.",
+                    ) from None
+
+        if synchronize_search is not None:
+
+            @app.post(
+                "/v1/internal/discovery/search-snapshots",
+                response_model=SearchSyncResponse,
+                responses={
+                    401: {"model": Problem, "description": "Unauthenticated"},
+                    403: {"model": Problem, "description": "Missing discovery:write scope"},
+                    422: {"model": Problem, "description": "Invalid profile event"},
+                },
+                tags=["Discovery"],
+            )
+            def synchronize_search_snapshot(
+                event: SearchSnapshotEvent, account: Account
+            ) -> SearchSyncResponse:
+                try:
+                    return SearchSyncResponse(applied=synchronize_search.execute(account, event))
+                except PermissionDenied:
+                    raise _http_error(
+                        403,
+                        "FORBIDDEN",
+                        "Forbidden",
+                        "The discovery:write scope is required.",
+                    ) from None
+
+        if run_discovery is not None:
+
+            @app.post(
+                "/v1/internal/discovery/runs",
+                response_model=DiscoveryRunResult,
+                response_model_by_alias=True,
+                responses={
+                    200: {"model": DiscoveryRunResult, "description": "Run completed or replayed"},
+                    400: {"model": Problem, "description": "Invalid idempotency key"},
+                    401: {"model": Problem, "description": "Unauthenticated"},
+                    403: {"model": Problem, "description": "Missing discovery:run scope"},
+                    409: {"model": Problem, "description": "Idempotency conflict"},
+                    422: {"model": Problem, "description": "Invalid scheduled command"},
+                },
+                tags=["Discovery"],
+            )
+            def run_daily_discovery(
+                command: DiscoveryRunCommand,
+                request: Request,
+                account: Account,
+                idempotency_key: Annotated[
+                    str,
+                    Header(
+                        alias="Idempotency-Key",
+                        min_length=16,
+                        max_length=128,
+                        pattern=_IDEMPOTENCY_PATTERN.pattern,
+                    ),
+                ],
+            ) -> DiscoveryRunResult:
+                try:
+                    return run_discovery.execute(
+                        account,
+                        command,
+                        idempotency_key=idempotency_key,
+                        correlation_id=request.state.correlation_id,
+                    )
+                except PermissionDenied:
+                    raise _http_error(
+                        403,
+                        "FORBIDDEN",
+                        "Forbidden",
+                        "The discovery:run scope is required.",
+                    ) from None
+                except DiscoveryIdempotencyConflict:
+                    raise _http_error(
+                        409,
+                        "IDEMPOTENCY_KEY_REUSED",
+                        "Idempotency key reused",
+                        "The idempotency key was already used for another discovery run.",
                     ) from None
 
     return app

@@ -29,7 +29,10 @@ Startup applies every adapter-owned migration and verifies the expected heads be
 
 ## Status
 
-Python service scaffold with isolated PostgreSQL persistence, startup migrations and health endpoints. Job ingestion and query behavior remain future increments.
+Python service with isolated PostgreSQL persistence, adapter-owned startup migrations,
+manual capture, normalized catalog queries and incremental daily discovery through the
+public Greenhouse Job Board API adapter. Scheduled orchestration remains in
+`careeros-automation`.
 
 ## License
 
