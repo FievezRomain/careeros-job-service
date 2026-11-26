@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from careeros_job.application.manual_capture import AccountContext, PermissionDenied
-from careeros_job.domain.opportunity import Opportunity, OpportunityOwner
+from careeros_job.domain.opportunity import Opportunity, OpportunityOwner, normalize_identity_text
 
 
 def _camel(value: str) -> str:
@@ -98,7 +98,7 @@ class DiscoveryRunCommand(DiscoveryModel):
 
 class SourceDefinition(DiscoveryModel):
     source_id: str = Field(min_length=1, max_length=200)
-    source_type: Literal["ats_api", "public_feed", "public_dataset", "career_page"]
+    source_type: Literal["ats_api", "public_feed", "public_dataset", "career_page", "open_web"]
     provider: str = Field(min_length=1, max_length=100)
     employer: str = Field(min_length=1, max_length=200)
 
@@ -112,12 +112,15 @@ class SourceCheckpoint(DiscoveryModel):
 class DiscoveredOpportunity(DiscoveryModel):
     external_id: str = Field(min_length=1, max_length=500)
     title: str = Field(min_length=1, max_length=200)
-    employer: str = Field(min_length=1, max_length=200)
-    description: str = Field(min_length=1, max_length=10_000)
-    location: str = Field(min_length=1, max_length=500)
+    employer: str | None = Field(min_length=1, max_length=200)
+    description: str | None = Field(min_length=1, max_length=10_000)
+    location: str | None = Field(min_length=1, max_length=500)
     source_url: str = Field(min_length=1, max_length=2_000)
     raw_source: str = Field(min_length=1, max_length=100_000)
     observed_at: datetime
+    original_url: str | None = Field(default=None, min_length=1, max_length=2_000)
+    retrieval_provider: str | None = Field(default=None, min_length=1, max_length=60)
+    source_access: Literal["full_text", "external_to_verify"] = "full_text"
 
 
 class SourceCollection(DiscoveryModel):
@@ -165,6 +168,10 @@ class DiscoveryRunResult(DiscoveryModel):
 
 
 class DiscoveryIdempotencyConflict(Exception):
+    pass
+
+
+class DiscoverySourceUnavailable(Exception):
     pass
 
 
@@ -346,7 +353,14 @@ class RunDailyDiscovery:
         counts: dict[str, int],
     ) -> None:
         for candidate in collection.items:
-            grouping_key = _fingerprint([candidate.title.casefold(), candidate.employer.casefold()])
+            grouping_key = _fingerprint(
+                [source.source_id, candidate.external_id]
+                if source.source_type == "open_web"
+                else [
+                    normalize_identity_text(candidate.title),
+                    normalize_identity_text(candidate.employer or ""),
+                ]
+            )
             group_id = UUID(
                 _fingerprint(
                     [
@@ -356,15 +370,16 @@ class RunDailyDiscovery:
                     ]
                 )[:32]
             )
-            material_hash = _fingerprint(
-                [
-                    candidate.title.casefold(),
-                    candidate.employer.casefold(),
-                    candidate.description,
-                    candidate.location,
-                    candidate.raw_source,
-                ]
-            )
+            material = [
+                candidate.title.casefold(),
+                (candidate.employer or "").casefold(),
+                candidate.description,
+                candidate.location,
+                candidate.raw_source,
+            ]
+            if source.source_type == "open_web":
+                material.extend((candidate.source_url, candidate.source_access))
+            material_hash = _fingerprint(material)
             observation = self._repository.observe_and_enqueue(
                 projection.owner,
                 source,

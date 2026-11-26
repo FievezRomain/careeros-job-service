@@ -246,7 +246,15 @@ class SqlAlchemyDiscoveryRepository:
                 if observation is not None
                 else None
             )
-            if observation is not None and observation.material_hash == material_hash:
+            if observation is not None and (
+                observation.material_hash == material_hash
+                or (
+                    previous is not None
+                    and previous.source_kind == "open_web"
+                    and previous.description is not None
+                    and candidate.source_access == "external_to_verify"
+                )
+            ):
                 if previous is None:
                     raise RuntimeError("observation references a missing opportunity")
                 observation.last_seen_at = observed_at
@@ -281,6 +289,8 @@ class SqlAlchemyDiscoveryRepository:
                 source_id=source.source_id,
                 source_external_id=candidate.external_id,
                 source_location=candidate.location,
+                source_original_url=candidate.original_url,
+                source_retrieval_provider=candidate.retrieval_provider,
                 last_seen_at=observed_at,
                 status="active",
             )

@@ -25,6 +25,7 @@ from careeros_job.domain.opportunity import (
     OpportunityEvidence,
     OpportunityOwner,
     SourceProvenance,
+    WebSourceProvenance,
 )
 
 
@@ -58,8 +59,8 @@ class JobRecordRow(Base):
     grouping_key: Mapped[str] = mapped_column(String(64), nullable=False)
     content_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
     title: Mapped[str] = mapped_column(String(200), nullable=False)
-    employer: Mapped[str] = mapped_column(String(200), nullable=False)
-    description: Mapped[str] = mapped_column(String(10_000), nullable=False)
+    employer: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    description: Mapped[str | None] = mapped_column(String(10_000), nullable=True)
     source_kind: Mapped[str] = mapped_column(String(32), nullable=False)
     source_reference: Mapped[str] = mapped_column(String(2_000), nullable=False)
     raw_source: Mapped[str] = mapped_column(Text, nullable=False)
@@ -71,6 +72,8 @@ class JobRecordRow(Base):
     source_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
     source_external_id: Mapped[str | None] = mapped_column(String(500), nullable=True)
     source_location: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    source_original_url: Mapped[str | None] = mapped_column(String(2_000), nullable=True)
+    source_retrieval_provider: Mapped[str | None] = mapped_column(String(60), nullable=True)
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
 
@@ -92,7 +95,7 @@ def _aware(value: datetime) -> datetime:
 
 
 def _opportunity(row: JobRecordRow) -> Opportunity:
-    source = (
+    source: SourceProvenance | DiscoveredSourceProvenance | WebSourceProvenance = (
         SourceProvenance(
             reference=row.source_reference,
             raw_text=row.raw_source,
@@ -109,6 +112,26 @@ def _opportunity(row: JobRecordRow) -> Opportunity:
             last_seen_at=_aware(row.last_seen_at or row.captured_at),
         )
     )
+    source_access = "full_text"
+    if row.source_kind == "open_web":
+        source = WebSourceProvenance(
+            source_id=row.source_id or row.source_kind,
+            external_identifier=row.source_external_id or str(row.id),
+            reference=row.source_reference,
+            original_reference=row.source_original_url or row.source_reference,
+            retrieval_provider=row.source_retrieval_provider,
+            raw_text=row.raw_source,
+            observed_at=_aware(row.captured_at),
+            last_seen_at=_aware(row.last_seen_at or row.captured_at),
+        )
+        if row.description is None:
+            source_access = "external_to_verify"
+    fields = {
+        "title": row.title,
+        "employer": row.employer,
+        "description": row.description,
+        "location": row.source_location,
+    }
     return Opportunity(
         opportunity_id=row.id,
         group_id=row.group_id,
@@ -118,13 +141,18 @@ def _opportunity(row: JobRecordRow) -> Opportunity:
         description=row.description,
         location=row.source_location,
         source=source,
+        source_access=source_access,
         status=row.status,
         evidence=(
             OpportunityEvidence()
             if row.source_kind == "manual"
             else OpportunityEvidence(
-                stated_fields=("title", "employer", "description", "location"),
-                unknown_fields=("contractType", "workMode"),
+                stated_fields=tuple(field for field, value in fields.items() if value is not None),
+                unknown_fields=(
+                    *[field for field, value in fields.items() if value is None],
+                    "contractType",
+                    "workMode",
+                ),
             )
         ),
         created_at=_aware(row.created_at),

@@ -77,6 +77,19 @@ never logged.
 
 ## Source configuration
 
+`AI_GATEWAY_URL` and `AI_GATEWAY_TOKEN` enable open-web discovery through the
+gateway's `discover-job-links` capability. Supply an `ai:invoke` service token through
+the environment secret store. The gateway has a 40-second HTTP timeout and each
+canonical lookup has a five-second timeout. Failed commands can replay with the
+same idempotency key. Only normalized role, location, remote and contract
+terms cross this boundary. Matching still applies the full private criteria locally.
+
+Search snippets remain source evidence. The collector only verifies explicit
+Greenhouse job URLs through the public Job Board API and keeps both references after
+resolution. Other links report `sourceAccess=external_to_verify` and
+`resumeEligible=false`. Unknown employer, description and location fields are `null`.
+Consumers use `evidence.unknownFields` and the access state before generating content.
+
 `GREENHOUSE_BOARDS` is a JSON array of `{source_id, board_token, employer}` records supplied
 per environment. No provider credential is required. Greenhouse documents that listing jobs
 is public and that only application submission requires authentication:
