@@ -1,8 +1,9 @@
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
+import httpx2
 from fastapi import FastAPI
-from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field
+from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, SecretStr, model_validator
 from pydantic_settings import SettingsConfigDict
 from sqlalchemy import create_engine
 
@@ -15,9 +16,9 @@ from careeros_job.adapters.postgresql.migrations.runner import (
 from careeros_job.adapters.postgresql.repository import SqlAlchemyOpportunityRepository
 from careeros_job.adapters.sources.greenhouse import (
     GreenhouseGateway,
-    GreenhouseSourceRegistry,
     UrlLibTransport,
 )
+from careeros_job.adapters.sources.open_web import DiscoverySources, OpenWebGateway
 from careeros_job.application.discovery import (
     RunDailyDiscovery,
     SourceDefinition,
@@ -45,6 +46,23 @@ class ServiceSettings(DatabaseSettings):
     oidc_audience: str = Field(min_length=1)
     oidc_jwks_url: AnyHttpUrl
     greenhouse_boards: tuple[GreenhouseBoardSettings, ...] = ()
+    ai_gateway_url: AnyHttpUrl | None = None
+    ai_gateway_token: SecretStr | None = None
+
+    @model_validator(mode="after")
+    def validate_web_configuration(self) -> ServiceSettings:
+        url = self.ai_gateway_url
+        if (url is None) != (self.ai_gateway_token is None):
+            raise ValueError("AI_GATEWAY_URL and AI_GATEWAY_TOKEN must be configured together")
+        if url is not None and (
+            url.username
+            or url.password
+            or url.query
+            or url.fragment
+            or (url.scheme != "https" and url.host not in {"localhost", "127.0.0.1", "[::1]"})
+        ):
+            raise ValueError("AI_GATEWAY_URL must be an HTTPS service URL or local loopback")
+        return self
 
 
 class SystemClock:
@@ -84,6 +102,20 @@ def create_application() -> FastAPI:
         for board in settings.greenhouse_boards
     )
     board_tokens = {board.source_id: board.board_token for board in settings.greenhouse_boards}
+    web_client = httpx2.Client(timeout=5, trust_env=False)
+    web = (
+        OpenWebGateway(
+            web_client, str(settings.ai_gateway_url), settings.ai_gateway_token.get_secret_value()
+        )
+        if settings.ai_gateway_url is not None and settings.ai_gateway_token is not None
+        else None
+    )
+    registry = DiscoverySources(sources, GreenhouseGateway(UrlLibTransport(), board_tokens), web)
+
+    def shutdown() -> None:
+        web_client.close()
+        engine.dispose()
+
     return create_http_app(
         StartService(migrations),
         capture_manual=capture_manual,
@@ -91,10 +123,10 @@ def create_application() -> FastAPI:
         synchronize_search=SynchronizeSearchSnapshot(discovery),
         run_discovery=RunDailyDiscovery(
             discovery,
-            GreenhouseSourceRegistry(sources),
-            GreenhouseGateway(UrlLibTransport(), board_tokens),
+            registry,
+            registry,
             Uuid4Factory(),
         ),
         token_verifier=token_verifier,
-        shutdown=engine.dispose,
+        shutdown=shutdown,
     )

@@ -4,7 +4,14 @@ from datetime import datetime
 from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    computed_field,
+    field_validator,
+)
 
 Title = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
 Employer = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
@@ -68,16 +75,25 @@ class SourceProvenance(BaseModel):
     captured_at: datetime = Field(alias="capturedAt")
 
 
-class DiscoveredSourceProvenance(BaseModel):
+class ObservedSourceProvenance(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, populate_by_name=True)
 
-    kind: Literal["greenhouse"]
     source_id: str = Field(alias="sourceId", min_length=1, max_length=200)
     external_identifier: str = Field(alias="externalIdentifier", min_length=1, max_length=500)
     reference: SourceReference
     raw_text: str = Field(alias="rawText", min_length=1, max_length=100_000)
     observed_at: datetime = Field(alias="observedAt")
     last_seen_at: datetime = Field(alias="lastSeenAt")
+
+
+class DiscoveredSourceProvenance(ObservedSourceProvenance):
+    kind: Literal["greenhouse"]
+
+
+class WebSourceProvenance(ObservedSourceProvenance):
+    kind: Literal["open_web"] = "open_web"
+    original_reference: SourceReference = Field(alias="originalReference")
+    retrieval_provider: str | None = Field(default=None, alias="retrievalProvider")
 
 
 class OpportunityEvidence(BaseModel):
@@ -99,10 +115,21 @@ class Opportunity(BaseModel):
     group_id: UUID = Field(alias="groupId")
     version: int = Field(ge=1)
     title: Title
-    employer: Employer
-    description: Description
+    employer: Employer | None
+    description: Description | None
     location: str | None = Field(default=None, max_length=500)
-    source: Annotated[SourceProvenance | DiscoveredSourceProvenance, Field(discriminator="kind")]
+    source: Annotated[
+        SourceProvenance | DiscoveredSourceProvenance | WebSourceProvenance,
+        Field(discriminator="kind"),
+    ]
+    source_access: Literal["full_text", "external_to_verify"] = Field(
+        default="full_text", alias="sourceAccess"
+    )
     status: Literal["active", "saved", "ignored", "expired", "applied"] = "active"
     evidence: OpportunityEvidence = Field(default_factory=OpportunityEvidence)
     created_at: datetime = Field(alias="createdAt")
+
+    @computed_field(alias="resumeEligible")  # type: ignore[prop-decorator]
+    @property
+    def resume_eligible(self) -> bool:
+        return self.source_access == "full_text" and self.description is not None

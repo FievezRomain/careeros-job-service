@@ -28,6 +28,7 @@ from careeros_job.application.discovery import (
     DiscoveryIdempotencyConflict,
     DiscoveryRunCommand,
     DiscoveryRunResult,
+    DiscoverySourceUnavailable,
     RunDailyDiscovery,
     SearchSnapshotEvent,
     SynchronizeSearchSnapshot,
@@ -396,6 +397,10 @@ def create_http_app(
                     403: {"model": Problem, "description": "Missing discovery:run scope"},
                     409: {"model": Problem, "description": "Idempotency conflict"},
                     422: {"model": Problem, "description": "Invalid scheduled command"},
+                    503: {
+                        "model": Problem,
+                        "description": "Discovery source temporarily unavailable",
+                    },
                 },
                 tags=["Discovery"],
             )
@@ -433,6 +438,13 @@ def create_http_app(
                         "IDEMPOTENCY_KEY_REUSED",
                         "Idempotency key reused",
                         "The idempotency key was already used for another discovery run.",
+                    ) from None
+                except DiscoverySourceUnavailable:
+                    raise _http_error(
+                        503,
+                        "DISCOVERY_SOURCE_UNAVAILABLE",
+                        "Discovery source unavailable",
+                        "Retry this discovery run using its original idempotency key.",
                     ) from None
 
     return app
